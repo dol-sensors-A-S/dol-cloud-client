@@ -1,0 +1,6 @@
+{
+    "user": "mail@dol-sensors.com",
+    "pwd": "password123",
+    "url": "https://dol-iot-api-qa.azurewebsites.net/api/",
+    "elasticApiKey": "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+}
