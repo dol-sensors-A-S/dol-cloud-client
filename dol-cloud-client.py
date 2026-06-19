@@ -48,9 +48,19 @@ class DeviceManagement:
                     cache = json.load(f)
                     self.token = cache.get("token", "")
                     self.tokenExpiresTime = cache.get("expireTime", 0)
-                    print(f"Token loaded from cache, expires at {self.tokenExpiresTime - self.current_time } (Unix timestamp)")
+                    print(f"Token loaded from cache, valid for {self.tokenExpiresTime - self.current_time} more seconds")
         except Exception as e:
             print(f"Error loading token cache: {e}")
+
+    def _invalidateTokenCache(self):
+        self.token = ""
+        self.tokenExpiresTime = 0
+        try:
+            if os.path.exists(self.tokenCachePath):
+                os.remove(self.tokenCachePath)
+                print("Cached token rejected by server; cleared it. Re-run to log in again.")
+        except Exception as e:
+            print(f"Error clearing token cache: {e}")
     
     def _isTokenValid(self):
         
@@ -107,7 +117,13 @@ class DeviceManagement:
                 return {"success": True, "data": None}
         else:
             print(f"Request failed: {result.status_code} - {result.text}")
-            return {"success": False, "error": result.text, "status_code": result.status_code}
+            # A 401 on an authenticated call means the cached token is stale or
+            # the account is not authorized. Drop the cache so the next run logs
+            # in fresh instead of replaying the same rejected token.
+            if result.status_code == 401:
+                self._invalidateTokenCache()
+            raise RuntimeError(
+                f"Request failed: {result.status_code} - {result.text}")
 
         
     # add gateway to account
