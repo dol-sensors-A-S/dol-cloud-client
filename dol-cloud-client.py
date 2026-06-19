@@ -8,6 +8,7 @@ import pandas as pd
 import plac
 import sqlalchemy
 import os
+import tempfile
 import matplotlib.colors as mcolors
 import random
 import matplotlib.pyplot as plt
@@ -559,7 +560,7 @@ class Table(Enum):
 # cli command line
 @plac.annotations(
     config=('json config file e.g. -c config.json', 'option', 'c', str),
-    folder=('Work output folder e.g. -f /Users/user/dir/', 'option', 'f', str),
+    folder=('Work output folder e.g. -f /path/to/dir', 'option', 'f', str),
     claim_device=('Claim device by providing its MAC address, key, type, owner and name e.g. -cd \'000ecd020000 nMNLPSNT IDOL64 Joe Gateway1\'', 'option', 'cd', str),
     unclaim_device=('Unclaim device by providing its MAC address e.g. -ud 000ecd020000', 'option', 'ud', str),
     add_lora_sensor=('Add LoRa sensor to device by providing its MAC address, name, devEui, type and sample rate e.g. -als \'000ecd020000 Sensor1 f2b3d57ed8522302 IDOL53 60\'', 'option', 'als', str),
@@ -577,7 +578,7 @@ class Table(Enum):
     mail=('send mail with excel and plots. Require -e and/or -p e.g. -e -p -m', 'flag', 'm'),
     since=('Date in YYYY-MM-DD format', 'option', 's', str)
 )
-def main(config="config-qa-example.json", folder="/tmp", claim_device=None, unclaim_device=None, 
+def main(config="config-qa-example.json", folder=None, claim_device=None, unclaim_device=None,
          add_lora_sensor=None, remove_lora_sensor=None, update_lora_sensor=None, 
          add_wired_sensor=None, list_devices=False, list_sensors=None, export_all=None, 
          export_device=None, dead_letter=False, read_only=False, excel=False, plot=False, 
@@ -588,9 +589,10 @@ def main(config="config-qa-example.json", folder="/tmp", claim_device=None, uncl
 
     if folder:
         folderDir = folder
+    else:
+        folderDir = tempfile.gettempdir()
 
     dateTimeNow = datetime.datetime.now().strftime("%d-%m-%Y_%H-%M")
-    folderSub = dateTimeNow + "/"
     dev = DeviceManagement(configData) 
     
     if claim_device:
@@ -636,32 +638,34 @@ def main(config="config-qa-example.json", folder="/tmp", claim_device=None, uncl
         dev.GetDevice(list_sensors)
 
     if export_all or export_device:
-        folderBase = folderDir + "/" + (export_device or export_all) + "/"
-        filePathDB = folderDir + "/" + (export_device or export_all) + ".db"
-        db = Database("sqlite:////" + filePathDB)
+        deviceOrAll = export_device or export_all
+        folderBase = os.path.join(folderDir, deviceOrAll)
+        filePathDB = os.path.join(folderDir, deviceOrAll + ".db")
+        db = Database("sqlite:///" + filePathDB.replace("\\", "/"))
 
         if not os.path.exists(folderBase):
             os.mkdir(folderBase)
 
-        if not os.path.exists(folderBase + folderSub):
-            os.mkdir(folderBase + folderSub)
+        folderSubPath = os.path.join(folderBase, dateTimeNow)
+        if not os.path.exists(folderSubPath):
+            os.mkdir(folderSubPath)
 
-        print("Using folder: " + folderBase + folderSub)
+        print("Using folder: " + folderSubPath)
         print("Emptying cloud queue to local database...")
         dev.EmptyQueue(Table.DATA.value, export_device, export_all, db, dead_letter, read_only)
         dev.EmptyQueue(Table.STATUS.value, export_device, export_all, db, dead_letter, read_only)
-        
+
         if excel:
             print("Exporting data to Excel file...")
-            filePathExcel = folderBase + folderSub + (export_device or export_all) + "_" + dateTimeNow + ".xlsx"
+            filePathExcel = os.path.join(folderSubPath, deviceOrAll + "_" + dateTimeNow + ".xlsx")
             db.ExportToExcel(filePathExcel, since)
 
         if plot:
             print("Generating plots...")
-            pathPlot = folderBase + folderSub + (export_device or export_all) + "_" + dateTimeNow
+            pathPlot = os.path.join(folderSubPath, deviceOrAll + "_" + dateTimeNow)
             exportDataFrame = db.Export(since, Table.DATA.value)
             plot = GenerateDiagram()
-            plot.GeneratePlot(exportDataFrame, pathPlot)    
+            plot.GeneratePlot(exportDataFrame, pathPlot)
 
         if mail and (excel or plot):
             print("Sending mail with excel and or plots attached...")

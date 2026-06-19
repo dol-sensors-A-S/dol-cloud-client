@@ -1,17 +1,18 @@
+import os
 import requests
 import shutil
 
 class ElasticMailClient:
-    
+
     def __init__(self, config, folder, datetime):
         self.apiUri = "https://api.elasticemail.com/v2"
         self.apiKey = config["elasticApiKey"]
-        self.rootPath = folder + datetime + "/"
+        self.rootPath = os.path.join(folder, datetime)
         self.attachments = []
         self.email = config["user"]
         self.subject = "Measurements report"
         self.datetime = datetime
-        self.zipname = folder + datetime
+        self.zipname = os.path.join(folder, datetime)
         self.reply = "no-reply@dol-sensors.com"
        
     def Request(self, method, url, data, attachs=None):
