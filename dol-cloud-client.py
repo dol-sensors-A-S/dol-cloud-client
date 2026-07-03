@@ -579,7 +579,7 @@ class Table(Enum):
     folder=('Work output folder e.g. -f /path/to/dir', 'option', 'f', str),
     claim_device=('Claim device by providing its MAC address, key, type, owner and name e.g. -cd \'000ecd020000 nMNLPSNT IDOL64 Joe Gateway1\'', 'option', 'cd', str),
     unclaim_device=('Unclaim device by providing its MAC address e.g. -ud 000ecd020000', 'option', 'ud', str),
-    add_lora_sensor=('Add LoRa sensor to device by providing its MAC address, name, devEui, type and sample rate e.g. -als \'000ecd020000 Sensor1 f2b3d57ed8522302 IDOL53 60\'', 'option', 'als', str),
+    add_lora_sensor=('Add LoRa sensor to device by providing its MAC address, name, devEui, type and sample rate e.g. -als \'000ecd020000 Sensor1 f2b3d57ed8522302 DOL53 60\'', 'option', 'als', str),
     remove_lora_sensor=('Remove LoRa sensor from device by providing its MAC address and devEui e.g. -rls \'000ecd020000 f2b3d57ed8522302\'', 'option', 'rls', str),
     update_lora_sensor=('Update LoRa sensor configuration by providing its MAC address, devEui and sample rate e.g. -uls \'000ecd020000 f2b3d57ed8522302 60\'', 'option', 'uls', str),
     add_wired_sensor=('Add wired sensor to device by providing its MAC address and sensors e.g. -aws \'000ecd020000 [{"port":1,"wiredSensorType":"DOL139","samplingRate":60},{"port":2,"wiredSensorType":"DOL53","samplingRate":60}]\'', 'option', 'aws', str),
