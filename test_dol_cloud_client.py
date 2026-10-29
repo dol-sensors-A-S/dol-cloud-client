@@ -61,6 +61,15 @@ def _make_dm(monkeypatch=None, config=None):
     return dm
 
 
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path, monkeypatch):
+    """Keep the token cache out of the real home directory."""
+    home = str(tmp_path / "home")
+    monkeypatch.setattr(os.path, "expanduser",
+                        lambda p: home + p[1:] if p.startswith("~") else p)
+    os.makedirs(tmp_path / "home", exist_ok=True)
+
+
 def _sqlite_url(tmp_path):
     db_path = str(tmp_path / "test.db")
     return "sqlite:///" + db_path.replace("\\", "/")
@@ -92,7 +101,7 @@ class TestDeviceManagementAuth:
 
     def test_load_valid_cached_token_skips_login(self):
         future_ts = int(datetime.datetime.now().timestamp()) + 9999
-        cache = {"token": "cached_tok", "expireTime": future_ts}
+        cache = {"user": "u@test.com", "url": "https://api/", "token": "cached_tok", "expireTime": future_ts}
         cfg = {"user": "u@test.com", "pwd": "pw", "url": "https://api/"}
         with patch("os.path.exists", return_value=True), \
              patch("builtins.open", mock_open(read_data=json.dumps(cache))), \
@@ -100,6 +109,22 @@ class TestDeviceManagementAuth:
             dm = DeviceManagement(cfg)
         mock_post.assert_not_called()
         assert dm.token == "cached_tok"
+
+    @pytest.mark.parametrize("cached", [
+        {"user": "u@test.com", "url": "https://qa/"},     # other environment
+        {"user": "other@test.com", "url": "https://api/"}, # other login
+        {},                                                # old cache without owner
+    ])
+    def test_cached_token_for_other_login_or_env_triggers_login(self, cached):
+        future_ts = int(datetime.datetime.now().timestamp()) + 9999
+        cache = {**cached, "token": "cached_tok", "expireTime": future_ts}
+        cfg = {"user": "u@test.com", "pwd": "pw", "url": "https://api/"}
+        with patch("os.path.exists", return_value=True), \
+             patch("builtins.open", mock_open(read_data=json.dumps(cache))), \
+             patch("requests.post", return_value=_mock_login_response()) as mock_post:
+            dm = DeviceManagement(cfg)
+        mock_post.assert_called_once()
+        assert dm.token == "tok123"
 
     def test_expired_cache_triggers_login(self):
         past_ts = int(datetime.datetime.now().timestamp()) - 100
@@ -149,9 +174,9 @@ class TestDeviceManagementAuth:
     def test_check_response_failure(self):
         dm = _make_dm()
         resp = MagicMock(status_code=401, text="Unauthorized")
-        result = dm._checkResponse(resp)
-        assert result["success"] is False
-        assert result["status_code"] == 401
+        with pytest.raises(RuntimeError, match="401"):
+            dm._checkResponse(resp)
+        assert dm.token == ""
 
 
 # ===========================================================================
@@ -280,6 +305,7 @@ class TestDeviceManagementQueue:
 
         msg = MagicMock()
         msg.__str__ = lambda s: json.dumps({"deviceId": "DEV1", "value": 42})
+        msg.subject = None
 
         mock_receiver = MagicMock()
         mock_receiver.__enter__ = MagicMock(return_value=mock_receiver)
@@ -292,6 +318,7 @@ class TestDeviceManagementQueue:
         mock_sbc_instance.get_queue_receiver.return_value = mock_receiver
 
         mock_db = MagicMock()
+        mock_db.Insert.return_value = True
 
         with patch.object(DeviceManagement, 'ServiceBusClient') as mock_sbc, \
              patch.object(dol_mod, 'alive_bar') as mock_bar, \
@@ -315,6 +342,7 @@ class TestDeviceManagementQueue:
 
         msg = MagicMock()
         msg.__str__ = lambda s: json.dumps({"deviceId": "DEV1", "value": 42})
+        msg.subject = None
 
         mock_receiver = MagicMock()
         mock_receiver.__enter__ = MagicMock(return_value=mock_receiver)
@@ -327,6 +355,7 @@ class TestDeviceManagementQueue:
         mock_sbc_instance.get_queue_receiver.return_value = mock_receiver
 
         mock_db = MagicMock()
+        mock_db.Insert.return_value = True
 
         with patch.object(DeviceManagement, 'ServiceBusClient') as mock_sbc, \
              patch.object(dol_mod, 'alive_bar') as mock_bar, \
@@ -771,3 +800,328 @@ class TestCrossPlatformPaths:
     def test_tempfile_gettempdir_returns_valid(self):
         result = tempfile.gettempdir()
         assert os.path.isdir(result)
+
+
+# ===========================================================================
+# 11. IDOL65 camera — calibration, images and device status
+# ===========================================================================
+
+class TestCamera:
+    def _ok_response(self, data=""):
+        resp = MagicMock(status_code=200, text=json.dumps(data))
+        resp.json.return_value = data
+        return resp
+
+    def test_calibrate(self):
+        dm = _make_dm()
+        with patch("requests.post", return_value=self._ok_response("Calibration started")) as mp:
+            dm.Calibrate("MAC1")
+        assert mp.call_args[0][0] == "https://api.test/devices/MAC1/calibrate"
+
+    def test_calibrate_offline_raises(self):
+        dm = _make_dm()
+        resp = MagicMock(status_code=409, text="Device is not online")
+        with patch("requests.post", return_value=resp), \
+             pytest.raises(RuntimeError, match="409"):
+            dm.Calibrate("MAC1")
+
+    def test_manual_calibrate(self):
+        dm = _make_dm()
+        with patch("requests.post", return_value=self._ok_response("ok")) as mp:
+            dm.ManualCalibrate("MAC1", 1.5, -2.0, 2300.0)
+        assert mp.call_args[0][0] == "https://api.test/devices/MAC1/manualCalibrate"
+        assert mp.call_args[1]["json"] == {"angleX": 1.5, "angleY": -2.0, "height": 2300.0}
+
+    @pytest.mark.parametrize("args", [(5, 0, 2300), (0, -4.1, 2300), (0, 0, 1999), (0, 0, 2501)])
+    def test_manual_calibrate_out_of_range(self, args):
+        dm = _make_dm()
+        with patch("requests.post") as mp, pytest.raises(ValueError):
+            dm.ManualCalibrate("MAC1", *args)
+        mp.assert_not_called()
+
+    def test_get_image_binary(self, tmp_path):
+        dm = _make_dm()
+        resp = MagicMock(status_code=200, content=b"\x89PNG\r\n....",
+                         headers={"Content-Type": "application/octet-stream"})
+        with patch("requests.post", return_value=resp) as mp, \
+             patch.object(dm, "_checkResponse") as mc:
+            paths = dm.GetImage("MAC1", str(tmp_path))
+        mc.assert_not_called()
+        assert mp.call_args[0][0].endswith("devices/MAC1/getImage")
+        assert len(paths) == 1 and paths[0].endswith(".png")
+        assert open(paths[0], "rb").read() == b"\x89PNG\r\n...."
+
+    def test_get_image_zip_with_filename(self, tmp_path):
+        dm = _make_dm()
+        resp = MagicMock(status_code=200, content=b"PK\x03\x04data",
+                         headers={"Content-Type": "application/zip",
+                                  "Content-Disposition": 'attachment; filename="images.zip"'})
+        with patch("requests.post", return_value=resp):
+            paths = dm.GetImage("MAC1", str(tmp_path))
+        assert paths == [os.path.join(str(tmp_path), "images.zip")]
+
+    def test_get_image_json_base64_list(self, tmp_path):
+        import base64
+        dm = _make_dm()
+        images = [base64.b64encode(b"\xff\xd8one").decode(), base64.b64encode(b"\xff\xd8two").decode()]
+        resp = MagicMock(status_code=200, headers={"Content-Type": "application/json"})
+        resp.json.return_value = images
+        with patch("requests.post", return_value=resp):
+            paths = dm.GetImage("MAC1", str(tmp_path))
+        assert len(paths) == 2
+        assert all(p.endswith(".jpg") for p in paths)
+
+    def test_get_image_error_raises(self, tmp_path):
+        dm = _make_dm()
+        resp = MagicMock(status_code=400, text="only IDOL65 can generate images")
+        with patch("requests.post", return_value=resp), \
+             pytest.raises(RuntimeError, match="400"):
+            dm.GetImage("MAC1", str(tmp_path))
+        assert os.listdir(tmp_path) == ["home"]
+
+    def test_get_device_idol65_camera_status(self, capsys):
+        dm = _make_dm()
+        device = {
+            "mac": "MAC1", "key": "K", "deviceType": "IDOL65", "owner": None,
+            "deviceName": "Cam", "firmwareVersion": None, "isOnline": True,
+            "lastActivityUtc": None, "sensors": None, "wiredSensors": None,
+            "cameraStatus": {
+                "cameraDirty": "Clean", "manuallyCalibrated": False,
+                "calibrationStatus": "Done", "lastCalibrationTime": "2024-03-14T13:29:54Z",
+                "messages": [{"MessageId": 0, "MessageText": "In-pen calibration successful",
+                              "MessagePayload": ""}],
+            },
+        }
+        resp = MagicMock(status_code=200, text=json.dumps(device))
+        resp.json.return_value = device
+        with patch("requests.get", return_value=resp):
+            dm.GetDevice("MAC1")
+        out = capsys.readouterr().out
+        assert "Calibration status: Done" in out
+        assert "In-pen calibration successful" in out
+
+    def test_get_device_checks_response_before_json(self):
+        dm = _make_dm()
+        resp = MagicMock(status_code=404, text="Could not find device MAC1")
+        resp.json.side_effect = json.JSONDecodeError("x", "", 0)
+        with patch("requests.get", return_value=resp), \
+             pytest.raises(RuntimeError, match="404"):
+            dm.GetDevice("MAC1")
+
+    def test_list_devices_pages(self):
+        dm = _make_dm()
+        pages = [
+            {"devices": [{"mac": "AA"}, {"mac": "BB"}], "pageNumber": 1, "pageSize": 2, "deviceTotal": 3},
+            {"devices": [{"mac": "CC"}], "pageNumber": 2, "pageSize": 2, "deviceTotal": 3},
+        ]
+        resps = []
+        for page in pages:
+            r = MagicMock(status_code=200, text=json.dumps(page))
+            r.json.return_value = page
+            resps.append(r)
+        with patch("requests.get", side_effect=resps) as mg:
+            dm.ListDevices(pageSize=2)
+        assert mg.call_count == 2
+        assert "page=2" in mg.call_args[0][0]
+        assert [d["mac"] for d in dm.devices["devices"]] == ["AA", "BB", "CC"]
+
+
+# ===========================================================================
+# 12. Database — queue messages from IDOL65 and status subjects
+# ===========================================================================
+
+class TestQueueMessages:
+    def _read(self, url, table):
+        return pd.read_sql(f"SELECT * FROM {table}", sqlalchemy.create_engine(url))
+
+    def _vision_message(self, calibration="Done"):
+        return {
+            "deviceId": "CAM1",
+            "visionStatus": {
+                "isDirty": "Dirty", "isDetectingDirty": "True",
+                "IsDeviceManuallyCalibrated": "True", "calibration": calibration,
+                "calibrationLastUpdate": "2024-06-27T10:17:05Z",
+                "messages": [
+                    {"MessageId": 0, "MessageText": "In-pen calibration successful ", "MessagePayload": ""},
+                    {"MessageId": 7, "MessageText": "Lens dirty", "MessagePayload": "x"},
+                ],
+            },
+            "timestamp": 1700151990,
+        }
+
+    def test_vision_status(self, tmp_path):
+        url = _sqlite_url(tmp_path)
+        db = Database(url)
+        assert db.Insert(self._vision_message(), "sensorStatus", "VisionStatus") is True
+        vision = self._read(url, "visionStatus")
+        assert len(vision) == 1
+        assert vision.iloc[0]["calibration"] == "Done"
+        assert vision.iloc[0]["isDeviceManuallyCalibrated"] == "True"
+        messages = self._read(url, "visionMessage")
+        assert list(messages["messageText"]) == ["In-pen calibration successful ", "Lens dirty"]
+        assert "sensorStatus" not in sqlalchemy.inspect(sqlalchemy.create_engine(url)).get_table_names()
+
+    def test_vision_status_without_subject(self, tmp_path):
+        url = _sqlite_url(tmp_path)
+        db = Database(url)
+        assert db.Insert(self._vision_message(), "sensorStatus") is True
+        assert len(self._read(url, "visionStatus")) == 1
+
+    def test_connection_then_vision_keeps_both(self, tmp_path):
+        """Regression: VisionStatus columns were dropped once sensorStatus existed."""
+        url = _sqlite_url(tmp_path)
+        db = Database(url)
+        db.Insert({"deviceId": "CAM1", "state": "deviceConnected", "timestamp": 1},
+                  "sensorStatus", "DeviceConnectionChanged")
+        db.Insert(self._vision_message("Started"), "sensorStatus", "VisionStatus")
+        db.Insert(self._vision_message("Done"), "sensorStatus", "VisionStatus")
+        status = self._read(url, "sensorStatus")
+        assert status.iloc[0]["state"] == "deviceConnected"
+        assert status.iloc[0]["subject"] == "DeviceConnectionChanged"
+        assert list(self._read(url, "visionStatus")["calibration"]) == ["Started", "Done"]
+
+    def test_battery_updates(self, tmp_path):
+        url = _sqlite_url(tmp_path)
+        db = Database(url)
+        msg = {"deviceId": "GW1", "timestamp": 1713437768,
+               "batteryUpdates": [{"devEui": "a8", "code": 2, "batteryStatus": "Very low"}]}
+        assert db.Insert(msg, "sensorStatus", "SensorBatteryUpdates") is True
+        battery = self._read(url, "batteryUpdate")
+        assert battery.iloc[0]["batteryStatus"] == "Very low"
+        assert battery.iloc[0]["code"] == 2
+
+    def test_inactive_sensors_message(self, tmp_path):
+        url = _sqlite_url(tmp_path)
+        db = Database(url)
+        msg = {"deviceId": "GW1", "timestamp": 170,
+               "inactiveSensors": [{"name": "S1", "devEui": "EUI1", "lastSeenAt": "2024"}]}
+        assert db.Insert(msg, "sensorStatus", "SensorsInactive") is True
+        assert self._read(url, "inactiveSensor").iloc[0]["devEui"] == "EUI1"
+
+    def test_unknown_nested_status_stored_as_json(self, tmp_path):
+        url = _sqlite_url(tmp_path)
+        db = Database(url)
+        msg = {"deviceId": "GW1", "timestamp": 1, "things": [{"a": 1}]}
+        assert db.Insert(msg, "sensorStatus", "SomethingNew") is True
+        assert json.loads(self._read(url, "sensorStatus").iloc[0]["things"]) == [{"a": 1}]
+
+    def test_idol65_weight_data(self, tmp_path):
+        url = _sqlite_url(tmp_path)
+        db = Database(url)
+        msg = {"id": "9e0d", "count": 24934, "CountDelta": 126, "minWeight": 92.8,
+               "maxWeight": 122.67, "timespan": 3600, "sd": 7.47, "skewness": 2.69,
+               "withinSpec": True, "deviceId": "CAM1", "sensorId": "CAM1",
+               "sensorName": "Pen 1", "value": 107.73, "type": "Weight", "unit": "kg",
+               "timestamp": 1700572959, "_ts": 1700573015}
+        assert db.Insert(msg, "sensorData") is True
+        data = self._read(url, "sensorData")
+        assert data.iloc[0]["value"] == 107.73
+        weight = self._read(url, "weightStatistics")
+        assert weight.iloc[0]["id"] == "9e0d"
+        assert weight.iloc[0]["countdelta"] == 126
+        assert weight.iloc[0]["withinspec"] == 1
+
+    def test_plain_sensor_data_has_no_weight_row(self, tmp_path):
+        url = _sqlite_url(tmp_path)
+        db = Database(url)
+        db.Insert({"id": "1", "deviceId": "GW1", "sensorId": "S1", "sensorName": "T",
+                   "value": 1.0, "type": "t", "unit": "C", "timestamp": 1}, "sensorData")
+        assert "weightStatistics" not in sqlalchemy.inspect(sqlalchemy.create_engine(url)).get_table_names()
+
+    def test_failed_insert_returns_false(self, tmp_path):
+        db = Database(_sqlite_url(tmp_path))
+        with patch.object(db, "_append", side_effect=sqlalchemy.exc.OperationalError("x", {}, None)):
+            assert db.Insert(self._vision_message(), "sensorStatus", "VisionStatus") is False
+
+    def test_empty_queue_abandons_on_failed_insert(self):
+        dm = _make_dm()
+        dm.queueConn, dm.queueName, dm.queueSize, dm.queueDeadletterSize = "conn", "q", 1, 0
+
+        msg = MagicMock()
+        msg.__str__ = lambda s: json.dumps({"deviceId": "DEV1", "visionStatus": {}})
+        msg.subject = "VisionStatus"
+
+        mock_receiver = MagicMock()
+        mock_receiver.__enter__ = MagicMock(return_value=mock_receiver)
+        mock_receiver.__exit__ = MagicMock(return_value=False)
+        mock_receiver.__iter__ = MagicMock(return_value=iter([msg]))
+        mock_sbc_instance = MagicMock()
+        mock_sbc_instance.__enter__ = MagicMock(return_value=mock_sbc_instance)
+        mock_sbc_instance.__exit__ = MagicMock(return_value=False)
+        mock_sbc_instance.get_queue_receiver.return_value = mock_receiver
+
+        mock_db = MagicMock()
+        mock_db.Insert.return_value = False
+
+        with patch.object(DeviceManagement, 'ServiceBusClient') as mock_sbc, \
+             patch.object(dol_mod, 'alive_bar') as mock_bar, \
+             patch.object(dm, 'GetQueueMetaData'):
+            mock_sbc.from_connection_string.return_value = mock_sbc_instance
+            mock_bar.return_value.__enter__ = MagicMock(return_value=MagicMock())
+            mock_bar.return_value.__exit__ = MagicMock(return_value=False)
+            dm.EmptyQueue("sensorStatus", None, "integrator1", mock_db, False, False)
+
+        mock_db.Insert.assert_called_once_with(
+            {"deviceId": "DEV1", "visionStatus": {}}, "sensorStatus", "VisionStatus")
+        mock_receiver.complete_message.assert_not_called()
+        mock_receiver.abandon_message.assert_called_once_with(msg)
+
+
+# ===========================================================================
+# 13. Plot and CLI for new commands
+# ===========================================================================
+
+class TestNewCommands:
+    def test_generate_plot_per_device_and_safe_unit(self):
+        gd = GenerateDiagram()
+        df = pd.DataFrame([
+            {"deviceId": "D1", "sensorId": "S1", "sensorName": "Wind", "value": 1.0, "unit": "m/s", "date": "2024-01-01 12:00"},
+            {"deviceId": "D2", "sensorId": "S2", "sensorName": "Temp", "value": 2.0, "unit": "C", "date": "2024-01-01 12:00"},
+        ])
+        with patch.object(dol_mod, 'plt') as mock_plt, \
+             patch.object(dol_mod, 'alive_bar') as mock_bar:
+            mock_ax = MagicMock()
+            mock_plt.subplots.return_value = (MagicMock(), mock_ax)
+            mock_bar.return_value.__enter__ = MagicMock(return_value=MagicMock())
+            mock_bar.return_value.__exit__ = MagicMock(return_value=False)
+            gd.GeneratePlot(df, "/tmp/plot")
+        saved = [c[0][0] for c in mock_plt.savefig.call_args_list]
+        assert saved == ["/tmp/plot-D1-S1-m_s.png", "/tmp/plot-D2-S2-C.png"]
+        assert mock_ax.set_title.call_args_list[0][0][0] == "D1 - Wind - m/s"
+
+    def test_calibrate_arg(self):
+        p = TestMain()._patch_main()
+        with p["open_patch"], p["json_load_patch"], p["dm_patch"] as mock_dm:
+            main(config="cfg.json", calibrate="MAC1")
+        mock_dm.return_value.Calibrate.assert_called_once_with("MAC1")
+
+    def test_manual_calibrate_arg_parsing(self):
+        p = TestMain()._patch_main()
+        with p["open_patch"], p["json_load_patch"], p["dm_patch"] as mock_dm:
+            main(config="cfg.json", manual_calibrate="MAC1 0.5 -1 2300")
+        mock_dm.return_value.ManualCalibrate.assert_called_once_with("MAC1", 0.5, -1.0, 2300.0)
+
+    def test_get_image_arg_uses_folder(self):
+        p = TestMain()._patch_main()
+        with p["open_patch"], p["json_load_patch"], p["dm_patch"] as mock_dm:
+            main(config="cfg.json", folder="/out", get_image="MAC1")
+        mock_dm.return_value.GetImage.assert_called_once_with("MAC1", "/out")
+
+    def test_claim_device_name_with_spaces(self):
+        p = TestMain()._patch_main()
+        with p["open_patch"], p["json_load_patch"], p["dm_patch"] as mock_dm:
+            main(config="cfg.json", claim_device='MAC1 KEY1 IDOL64 "Joe Farm" "Gateway 1"')
+        mock_dm.return_value.Claim.assert_called_once_with("MAC1", "KEY1", "IDOL64", "Joe Farm", "Gateway 1")
+
+    def test_add_lora_sensor_name_with_spaces(self):
+        p = TestMain()._patch_main()
+        with p["open_patch"], p["json_load_patch"], p["dm_patch"] as mock_dm:
+            main(config="cfg.json", add_lora_sensor="MAC1 'Pen 3 outside' EUI1 DOL53 600")
+        mock_dm.return_value.AddLoraSensor.assert_called_once_with("MAC1", "Pen 3 outside", "EUI1", "DOL53", 600)
+
+    def test_unquoted_name_with_spaces_gives_clear_error(self):
+        p = TestMain()._patch_main()
+        with p["open_patch"], p["json_load_patch"], p["dm_patch"] as mock_dm, \
+             pytest.raises(SystemExit, match="expects 5 values"):
+            main(config="cfg.json", claim_device="MAC1 KEY1 IDOL64 Joe Gateway 1")
+        mock_dm.return_value.Claim.assert_not_called()

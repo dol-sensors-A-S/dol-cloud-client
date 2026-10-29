@@ -38,9 +38,102 @@
 pip install alive-progress requests pandas azure-servicebus matplotlib sqlalchemy xlsxwriter plac git+https://github.com/elasticemail/elasticemail-python.git@4.0.23
 ```
 
-### Command line usage ###
-`python3 data-export.py --config config.json --output /path/to/output`
-`python3 data-export.py --device 000ecd020000 --queue --excel --plot --mail`
+### Getting started ###
+
+Your login must be attached to an integrator account (done by a dol-sensors employee).
+The MAC address and key are printed on the label of the gateway / camera, the devEui on the label of the sensor.
+All commands that change a device require it to be online.
+
+Options that take several values (`-cd`, `-als`, `-uls`, `-rls`, `-mcal`) are given as one string, split on spaces.
+To use a name or owner **with spaces**, put it in double quotes inside the single-quoted string,
+e.g. `-als '000ecd020000 "Pen 3 outside" f2b3d57ed8522302 DOL53 600'`.
+On Windows (cmd / PowerShell) swap the quotes: `-als "000ecd020000 'Pen 3 outside' f2b3d57ed8522302 DOL53 600"`.
+
+**1. Create a config file**
+
+Copy `config-qa-example.json` to `config-qa.json` (test) or `config-prod-example.json` to `config-prod.json`
+(production) and fill in your login. These two file names are ignored by git, so your password is not committed.
+
+```json
+{
+    "user": "you@company.com",
+    "pwd": "your-password",
+    "url": "https://iot.dol-sensors.com/api/",
+    "elasticApiKey": "only needed for -m (mail)"
+}
+```
+
+**2. Check the login and list your devices**
+
+```bash
+python3 dol-cloud-client.py -c config-prod.json -ld
+```
+
+**3a. IDOL64 gateway: claim it and add sensors**
+
+```bash
+# claim: MAC key type owner name
+python3 dol-cloud-client.py -c config-prod.json -cd '000ecd020000 nMNLPSNT IDOL64 "Joe Farm" "Gateway 1"'
+
+# add a LoRa sensor: MAC name devEui type sampleRate(seconds)
+python3 dol-cloud-client.py -c config-prod.json -als '000ecd020000 "Pen 3 outside" f2b3d57ed8522302 DOL53 600'
+
+# change its sample rate: MAC devEui sampleRate
+python3 dol-cloud-client.py -c config-prod.json -uls '000ecd020000 f2b3d57ed8522302 300'
+
+# configure wired sensors on port 1-4 (replaces the current wired configuration)
+python3 dol-cloud-client.py -c config-prod.json -aws '000ecd020000 [{"port":1,"wiredSensorType":"DOL139","samplingRate":60}]'
+
+# verify the gateway and its sensors
+python3 dol-cloud-client.py -c config-prod.json -ls 000ecd020000
+```
+
+**3b. IDOL65 camera: claim it and calibrate**
+
+```bash
+# claim: MAC key type owner name
+python3 dol-cloud-client.py -c config-prod.json -cd 'ddeecdff015f AbCdEfGh IDOL65 "Joe Farm" "Camera pen 1"'
+
+# auto calibrate (recommended)
+python3 dol-cloud-client.py -c config-prod.json -cal ddeecdff015f
+
+# or manual calibration if auto fails: MAC angleX(-4..4) angleY(-4..4) height(mm, 2000..2500)
+python3 dol-cloud-client.py -c config-prod.json -mcal 'ddeecdff015f 0 0 2300'
+
+# check camera status (dirty, calibration status, messages)
+python3 dol-cloud-client.py -c config-prod.json -ls ddeecdff015f
+
+# save a pair of IR images to check the camera view
+python3 dol-cloud-client.py -c config-prod.json -gi ddeecdff015f -f ./images
+```
+
+See [IDOL65 camera calibration](#idol65-camera-calibration) for how to follow the calibration result.
+
+**4. Read the data**
+
+Measurements and status changes are not available in the API, they are delivered to your queues.
+Empty the queues to a local SQLite database and export it:
+
+```bash
+# one device, export to Excel and plots in ./export
+python3 dol-cloud-client.py -c config-prod.json -ed 000ecd020000 -f ./export -e -p
+
+# all devices on the integrator, named "Joe" in the output folder
+python3 dol-cloud-client.py -c config-prod.json -ea Joe -f ./export -e
+
+# peek without removing messages (each read counts, after 3 they go to the deadletter queue)
+python3 dol-cloud-client.py -c config-prod.json -ed 000ecd020000 -ro
+
+# read the deadletter queue
+python3 dol-cloud-client.py -c config-prod.json -ed 000ecd020000 -dl -e
+```
+
+**Remove a sensor or a device**
+
+```bash
+python3 dol-cloud-client.py -c config-prod.json -rls '000ecd020000 f2b3d57ed8522302'
+python3 dol-cloud-client.py -c config-prod.json -ud 000ecd020000   # unclaim, resets the configuration
+```
 
 ### data-export ###
 * Connect to cloud API with login credentials from config.json 
@@ -110,10 +203,46 @@ pip install alive-progress requests pandas azure-servicebus matplotlib sqlalchem
 
 * **inactiveSensor** - Contains information about inactive sensors from status messages
 
+* **visionStatus** - IDOL65 camera status from `VisionStatus` status messages, one row per message:
+  deviceId, timestamp, isDirty, isDetectingDirty, isDeviceManuallyCalibrated, calibration (Required/Started/Done),
+  calibrationLastUpdate, lastWeightCacheClearCount, lastWeightCacheClearedUpdate
+
+* **visionMessage** - The `messages` list of each VisionStatus message (e.g. "In-pen calibration successful"):
+  deviceId, timestamp, messageId, messageText, messagePayload
+
+* **weightStatistics** - IDOL65 weight statistics from the data queue, join with sensorData on `id`:
+  id, deviceId, sensorId, timestamp, count, countdelta, minweight, maxweight, timespan, sd, skewness, withinspec
+
+* **batteryUpdate** - Sensor battery changes from `SensorBatteryUpdates` status messages:
+  deviceId, timestamp, devEui, code, batteryStatus
+
+Status messages with any other subject go to **sensorStatus** with a `subject` column. A message is only
+removed from the queue after it was stored; if the insert fails it is abandoned and stays in the queue.
+
+### IDOL65 camera calibration ###
+
+Auto calibration is recommended; use manual calibration only when auto calibration fails.
+
+```bash
+python3 dol-cloud-client.py -c config-prod.json -cal 000ecd020000                 # auto calibrate
+python3 dol-cloud-client.py -c config-prod.json -mcal '000ecd020000 0 0 2300'    # angleX angleY height(mm)
+python3 dol-cloud-client.py -c config-prod.json -ls 000ecd020000                  # current cameraStatus
+python3 dol-cloud-client.py -c config-prod.json -gi 000ecd020000 -f ./images      # save IR image pair
+```
+
+The calibrate call only sends the command to the camera. The progress (Started -> Done) and the camera
+messages arrive later on the status queue, so empty the queue after a few minutes to read them:
+
+```bash
+python3 dol-cloud-client.py -c config-prod.json -ed 000ecd020000 -e
+```
+
+and look at the `visionStatus` and `visionMessage` sheets / tables.
+
 ### Command line options ###
 
 ```bash
-usage: dol-cloud-client.py [-h] [-c config-qa-example.json] [-f /tmp] [-cd None] [-ud None] [-als None] [-rls None] [-uls None] [-aws None] [-ld] [-ls None] [-ea None] [-ed None] [-dl] [-ro] [-e] [-p] [-m] [-s None]
+usage: dol-cloud-client.py [-h] [-c config-qa-example.json] [-f /tmp] [-cd None] [-ud None] [-als None] [-rls None] [-uls None] [-aws None] [-cal None] [-mcal None] [-gi None] [-ld] [-ls None] [-ea None] [-ed None] [-dl] [-ro] [-e] [-p] [-m] [-s None]
 
 options:
   -h, --help            show this help message and exit
@@ -133,6 +262,12 @@ options:
                         Update LoRa sensor configuration by providing its MAC address, devEui and sample rate e.g. -uls '000ecd020000 f2b3d57ed8522302 60'
   -aws None, --add-wired-sensor None
                         Add wired sensor to device by providing its MAC address and sensors e.g. -aws '000ecd020000 [{"port":1,"wiredSensorType":"DOL139","samplingRate":60},{"port":2,"wiredSensorType":"DOL53","samplingRate":60}]'
+  -cal None, --calibrate None
+                        Auto calibrate IDOL65 camera by providing its MAC address e.g. -cal 000ecd020000
+  -mcal None, --manual-calibrate None
+                        Manually calibrate IDOL65 camera by providing its MAC address, angleX (-4..4), angleY (-4..4) and height in mm (2000..2500) e.g. -mcal '000ecd020000 0 0 2300'
+  -gi None, --get-image None
+                        Request a pair of IR images from IDOL65 camera, saved in work folder e.g. -gi 000ecd020000
   -ld, --list-devices   list all gateways on account e.g. -ld
   -ls None, --list-sensors None
                         list all sensors for a device by providing its MAC address e.g. -ls 000ecd020000
