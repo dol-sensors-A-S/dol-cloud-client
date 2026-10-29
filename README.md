@@ -211,7 +211,24 @@ python3 dol-cloud-client.py -c config-prod.json -ud 000ecd020000   # unclaim, re
   deviceId, timestamp, messageId, messageText, messagePayload
 
 * **weightStatistics** - IDOL65 weight statistics from the data queue, join with sensorData on `id`:
-  id, deviceId, sensorId, timestamp, count, countdelta, minweight, maxweight, timespan, sd, skewness, withinspec
+  id, deviceId, sensorId, timestamp, count, countDelta, minWeight, maxWeight, timespan, sd, skewness, withinSpec
+
+  Example IDOL65 data message (`value` is the mean weight, stored in sensorData; the rest in weightStatistics):
+
+  ```json
+  {"id":"ebf49df6-2773-4f0c-8196-2600375fc919","deviceId":"000ecdff0564","sensorId":"000ecdff0564_Camera01_kg",
+   "sensorName":"Camera01","value":24.75,"type":"Weight","unit":"kg","timestamp":1765152060,"withinSpec":true,
+   "count":17215,"minWeight":16.26,"maxWeight":33.25,"timespan":3600,"sd":4.25,"countDelta":391}
+  ```
+
+  Mean weight with its statistics:
+
+  ```sql
+  SELECT d.deviceId, d.sensorName, d.value AS meanWeight, w.minWeight, w.maxWeight, w.sd, w.count, w.withinSpec,
+         DATETIME(d.timestamp, 'unixepoch') AS date
+  FROM sensorData d JOIN weightStatistics w ON w.id = d.id
+  ORDER BY d.timestamp;
+  ```
 
 * **batteryUpdate** - Sensor battery changes from `SensorBatteryUpdates` status messages:
   deviceId, timestamp, devEui, code, batteryStatus

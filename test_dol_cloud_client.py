@@ -1018,8 +1018,29 @@ class TestQueueMessages:
         assert data.iloc[0]["value"] == 107.73
         weight = self._read(url, "weightStatistics")
         assert weight.iloc[0]["id"] == "9e0d"
-        assert weight.iloc[0]["countdelta"] == 126
-        assert weight.iloc[0]["withinspec"] == 1
+        assert weight.iloc[0]["countDelta"] == 126
+        assert weight.iloc[0]["withinSpec"] == 1
+
+    def test_idol65_weight_data_real_message(self, tmp_path):
+        """Real IDOL65 message, has no skewness."""
+        url = _sqlite_url(tmp_path)
+        db = Database(url)
+        msg = json.loads(
+            '{"id":"ebf49df6-2773-4f0c-8196-2600375fc919","deviceId":"000ecdff0564",'
+            '"sensorId":"000ecdff0564_Camera01_kg","sensorName":"Camera01","value":24.75,'
+            '"type":"Weight","unit":"kg","timestamp":1765152060,"withinSpec":true,"count":17215,'
+            '"minWeight":16.26,"maxWeight":33.25,"timespan":3600,"sd":4.25,"countDelta":391}')
+        assert db.Insert(msg, "sensorData") is True
+        joined = pd.read_sql(
+            "SELECT d.value, w.* FROM sensorData d JOIN weightStatistics w ON w.id = d.id",
+            sqlalchemy.create_engine(url))
+        row = joined.iloc[0]
+        assert row["value"] == 24.75
+        assert row["sensorId"] == "000ecdff0564_Camera01_kg"
+        assert (row["count"], row["countDelta"], row["timespan"]) == (17215, 391, 3600)
+        assert (row["minWeight"], row["maxWeight"], row["sd"]) == (16.26, 33.25, 4.25)
+        assert row["withinSpec"] == 1
+        assert row["skewness"] is None
 
     def test_plain_sensor_data_has_no_weight_row(self, tmp_path):
         url = _sqlite_url(tmp_path)

@@ -422,7 +422,7 @@ class Database:
         self.fileURL = fileURL
 
     # IDOL65 weight statistics, stored next to sensorData and joined on id
-    WEIGHT_KEYS = ['count', 'countdelta', 'minweight', 'maxweight', 'timespan', 'sd', 'skewness', 'withinspec']
+    WEIGHT_KEYS = ['count', 'countDelta', 'minWeight', 'maxWeight', 'timespan', 'sd', 'skewness', 'withinSpec']
 
     # insert a queue message (dict) or a dataframe into table, returns True when stored
     def Insert(self, data, table, subject=None):
@@ -556,10 +556,10 @@ class Database:
 
         if table == Table.DATA.value:
             lower = _lowerKeys(data)
-            if any(key in lower for key in self.WEIGHT_KEYS):
+            if any(key.lower() in lower for key in self.WEIGHT_KEYS):
                 weight = {'id': data.get('id'), 'deviceId': deviceId,
                           'sensorId': data.get('sensorId'), 'timestamp': timestamp}
-                weight.update({key: lower.get(key) for key in self.WEIGHT_KEYS})
+                weight.update({key: lower.get(key.lower()) for key in self.WEIGHT_KEYS})
                 self._append(pd.DataFrame([weight]), Table.WEIGHT.value)
             return data
 
