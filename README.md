@@ -47,7 +47,20 @@ All commands that change a device require it to be online.
 Options that take several values (`-cd`, `-als`, `-uls`, `-rls`, `-mcal`) are given as one string, split on spaces.
 To use a name or owner **with spaces**, put it in double quotes inside the single-quoted string,
 e.g. `-als '000ecd020000 "Pen 3 outside" f2b3d57ed8522302 DOL53 600'`.
-On Windows (cmd / PowerShell) swap the quotes: `-als "000ecd020000 'Pen 3 outside' f2b3d57ed8522302 DOL53 600"`.
+
+**Windows** (cmd / PowerShell):
+* Use `python` (or `py`) instead of `python3`.
+* Swap the quotes: `-als "000ecd020000 'Pen 3 outside' f2b3d57ed8522302 DOL53 600"`.
+* For `-aws` the JSON keeps its double quotes. In **cmd** escape them with `\`:
+
+  ```bat
+  python dol-cloud-client.py -c config-prod.json -aws "000ecd020000 [{\"port\":1,\"wiredSensorType\":\"DOL139\",\"samplingRate\":60}]"
+  ```
+
+  In **PowerShell 7.3+** use single quotes as on macOS/Linux:
+  `-aws '000ecd020000 [{"port":1,"wiredSensorType":"DOL139","samplingRate":60}]'`
+  (older Windows PowerShell 5.1 strips the inner quotes; use cmd for `-aws` there).
+* Paths use backslashes as normal, e.g. `-f C:\Users\joe\work`.
 
 **1. Create a config file**
 
