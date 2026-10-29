@@ -604,19 +604,33 @@ class Database:
             data['subject'] = subject
         return data
 
-    # append dataframe, creating the table or keeping only the columns it already has
+    # append dataframe, creating the table or adding columns it doesn't have yet
     def _append(self, df, table):
         engine = sqlalchemy.create_engine(self.fileURL)
         inspector = sqlalchemy.inspect(engine)
         if inspector.has_table(table):
-            existing_columns = [col['name'] for col in inspector.get_columns(table)]
-            df = df[[col for col in df.columns if col in existing_columns]]
-            if df.empty:
-                print(f"No matching columns found between data and table {table}")
-                return
+            # messages with other fields can arrive in any order e.g. SensorsInactive before
+            # DeviceConnectionChanged, so new fields like 'state' must not be dropped
+            existing_columns = {col['name'].lower() for col in inspector.get_columns(table)}
+            new_columns = [col for col in df.columns if col.lower() not in existing_columns]
+            if new_columns:
+                with engine.connect() as conn:
+                    for col in new_columns:
+                        conn.execute(sqlalchemy.text(
+                            f'ALTER TABLE "{table}" ADD COLUMN "{col}" {self._sqlType(df[col])}'))
+                    conn.commit()
+                print(f"Added columns {new_columns} to table {table}")
         else:
             print(f"Created new table {table}")
         self.numberInserted = df.to_sql(str(table), self.fileURL, if_exists='append', index=False)
+
+    @staticmethod
+    def _sqlType(column):
+        if pd.api.types.is_bool_dtype(column) or pd.api.types.is_integer_dtype(column):
+            return "INTEGER"
+        if pd.api.types.is_float_dtype(column):
+            return "FLOAT"
+        return "TEXT"
 
     def Export(self, since, tableName=None):
         if since:
@@ -658,9 +672,33 @@ class Database:
             print(f"Error getting table names: {e}")
             return []
 
+    # current IDOL65 camera state, one row per device
+    def VisionStatusLatest(self):
+        if Table.VISION.value not in self._get_all_tables():
+            return pd.DataFrame()
+
+        # each VisionStatus message only has the fields that changed,
+        # so take the last known value of every field per device
+        status = self._export_table(Table.VISION.value)
+        latest = status.sort_values('timestamp').groupby('deviceId', as_index=False).last()
+
+        if Table.VISION_MESSAGE.value in self._get_all_tables():
+            messages = self._export_table(Table.VISION_MESSAGE.value)
+            lastMessage = (messages.sort_values('timestamp').groupby('deviceId', as_index=False).last()
+                           [['deviceId', 'messageId', 'messageText', 'date']]
+                           .rename(columns={'messageId': 'lastMessageId', 'messageText': 'lastMessageText',
+                                            'date': 'lastMessageDate'}))
+            latest = latest.merge(lastMessage, on='deviceId', how='left')
+        return latest
+
     def ExportToExcel(self, filename, since=None):
         tables_data = self.Export(since)
-        
+
+        # from all history, not only since, so fields that changed long ago are included
+        latest = self.VisionStatusLatest()
+        if not latest.empty:
+            tables_data['visionStatusLatest'] = latest
+
         if not tables_data:
             print("No data to export")
             return False

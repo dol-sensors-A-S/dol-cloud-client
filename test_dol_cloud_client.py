@@ -435,18 +435,19 @@ class TestDatabaseInsert:
         result = pd.read_sql("SELECT * FROM sensorStatus", engine)
         assert len(result) == 1
 
-    def test_non_sensor_data_column_filtering(self, tmp_path):
-        """When table already exists, extra columns in new data are filtered out."""
+    def test_non_sensor_data_new_columns_added(self, tmp_path):
+        """When table already exists, new columns are added instead of dropped."""
         url = _sqlite_url(tmp_path)
         db = Database(url)
         df1 = pd.DataFrame([{"deviceId": "D1", "status": "on", "timestamp": 1}])
         db.Insert(df1, "other")
-        df2 = pd.DataFrame([{"deviceId": "D2", "status": "off", "timestamp": 2, "extra": "x"}])
+        df2 = pd.DataFrame([{"deviceId": "D2", "status": "off", "timestamp": 2, "extra": "x", "level": 1.5}])
         db.Insert(df2, "other")
         engine = sqlalchemy.create_engine(url)
         result = pd.read_sql("SELECT * FROM other", engine)
-        assert "extra" not in result.columns
         assert len(result) == 2
+        assert list(result["extra"]) == [None, "x"]
+        assert result.iloc[1]["level"] == 1.5
 
     def test_inactive_sensors_list(self, tmp_path):
         url = _sqlite_url(tmp_path)
@@ -979,6 +980,100 @@ class TestQueueMessages:
         assert status.iloc[0]["state"] == "deviceConnected"
         assert status.iloc[0]["subject"] == "DeviceConnectionChanged"
         assert list(self._read(url, "visionStatus")["calibration"]) == ["Started", "Done"]
+
+    REAL_VISION_MESSAGES = [
+        '{"deviceId":"000ecdff0427","visionStatus":{"calibrationLastUpdate":"2025-01-31T08:13:55Z","messages":[{"messageId":2,"messageText":"Max image has too few pixels withing distance limits.","messagePayload":""}]},"timestamp":1738311235}',
+        '{"deviceId":"000ecdff0427","visionStatus":{"calibration":"Required","messages":[]},"timestamp":1738311236}',
+        '{"deviceId":"000ecdff0423","visionStatus":{"calibrationLastUpdate":"2025-03-18T13:26:28Z","messages":[{"messageId":0,"messageText":"In-pen calibration successful ","messagePayload":""}]},"timestamp":1742304388}',
+        '{"deviceId":"000ecdff0423","visionStatus":{"calibration":"Done","messages":[]},"timestamp":1742304389}',
+        '{"deviceId":"000ecdff0422","visionStatus":{"isDirty":"Very Dirty","messages":[]},"timestamp":1744835030}',
+    ]
+
+    def _insert_real_vision(self, url):
+        db = Database(url)
+        for line in self.REAL_VISION_MESSAGES:
+            assert db.Insert(json.loads(line), "sensorStatus", "VisionStatus") is True
+        return db
+
+    def test_real_vision_messages(self, tmp_path):
+        """Real messages only carry the fields that changed."""
+        url = _sqlite_url(tmp_path)
+        self._insert_real_vision(url)
+        vision = self._read(url, "visionStatus")
+        assert len(vision) == 5
+        assert list(vision["calibration"]) == [None, "Required", None, "Done", None]
+        assert vision.iloc[4]["isDirty"] == "Very Dirty"
+        messages = self._read(url, "visionMessage")
+        assert list(messages["messageId"]) == [2, 0]
+        assert messages.iloc[0]["messageText"].startswith("Max image has too few pixels")
+
+    def test_vision_status_latest(self, tmp_path):
+        url = _sqlite_url(tmp_path)
+        db = self._insert_real_vision(url)
+        latest = db.VisionStatusLatest().set_index("deviceId")
+        assert sorted(latest.index) == ["000ecdff0422", "000ecdff0423", "000ecdff0427"]
+        # fields from separate messages are combined
+        assert latest.loc["000ecdff0427", "calibration"] == "Required"
+        assert latest.loc["000ecdff0427", "calibrationLastUpdate"] == "2025-01-31T08:13:55Z"
+        assert latest.loc["000ecdff0427", "lastMessageText"].startswith("Max image has too few pixels")
+        assert latest.loc["000ecdff0423", "calibration"] == "Done"
+        assert latest.loc["000ecdff0423", "lastMessageText"] == "In-pen calibration successful "
+        assert latest.loc["000ecdff0422", "isDirty"] == "Very Dirty"
+        assert pd.isna(latest.loc["000ecdff0422", "lastMessageText"])
+
+    def test_vision_status_latest_keeps_last_known_value(self, tmp_path):
+        url = _sqlite_url(tmp_path)
+        db = Database(url)
+        for ts, status in [(1, {"calibration": "Started"}), (2, {"isDirty": "Clean"}), (3, {"calibration": "Done"})]:
+            db.Insert({"deviceId": "CAM1", "visionStatus": {**status, "messages": []}, "timestamp": ts},
+                      "sensorStatus", "VisionStatus")
+        row = db.VisionStatusLatest().iloc[0]
+        assert (row["calibration"], row["isDirty"], row["timestamp"]) == ("Done", "Clean", 3)
+
+    def test_vision_status_latest_in_excel(self, tmp_path):
+        url = _sqlite_url(tmp_path)
+        db = self._insert_real_vision(url)
+        xlsx = str(tmp_path / "out.xlsx")
+        with patch.object(dol_mod, 'alive_bar') as mock_bar:
+            mock_bar.return_value.__enter__ = MagicMock(return_value=MagicMock())
+            mock_bar.return_value.__exit__ = MagicMock(return_value=False)
+            assert db.ExportToExcel(xlsx) is True
+        sheets = pd.read_excel(xlsx, sheet_name=None)
+        assert set(sheets) == {"visionStatus", "visionMessage", "visionStatusLatest"}
+        assert len(sheets["visionStatusLatest"]) == 3
+
+    def test_vision_status_latest_without_table(self, tmp_path):
+        assert Database(_sqlite_url(tmp_path)).VisionStatusLatest().empty
+
+    REAL_CONNECTION = ('{"deviceId":"000ecd04284f","state":"deviceDisconnected","timestamp":1791272274}',
+                       "DeviceConnectionChanged")
+    REAL_INACTIVE = ('{"deviceId":"000ecd04284f","inactiveSensors":[{"name":"DOL139","devEui":"f2b3d57ed8522535",'
+                     '"lastSeenAt":"2026-10-17T18:05:29Z"}],"timestamp":1792262431}', "SensorsInactive")
+
+    @pytest.mark.parametrize("order", [(REAL_CONNECTION, REAL_INACTIVE), (REAL_INACTIVE, REAL_CONNECTION)])
+    def test_real_status_messages_any_order(self, tmp_path, order):
+        """Regression: 'state' was dropped when SensorsInactive created sensorStatus first."""
+        url = _sqlite_url(tmp_path)
+        db = Database(url)
+        for message, subject in order:
+            assert db.Insert(json.loads(message), "sensorStatus", subject) is True
+        status = self._read(url, "sensorStatus").set_index("subject")
+        assert status.loc["DeviceConnectionChanged", "state"] == "deviceDisconnected"
+        assert status.loc["DeviceConnectionChanged", "timestamp"] == 1791272274
+        inactive = self._read(url, "inactiveSensor")
+        assert inactive.iloc[0][["deviceId", "name", "devEui", "lastSeenAt"]].tolist() == \
+            ["000ecd04284f", "DOL139", "f2b3d57ed8522535", "2026-10-17T18:05:29Z"]
+
+    def test_real_sensor_data(self, tmp_path):
+        url = _sqlite_url(tmp_path)
+        db = Database(url)
+        msg = json.loads('{"id":"b6adaffa-452a-4495-8bf7-c19d12eb9a7a","deviceId":"000ecd02f8f7",'
+                         '"sensorId":"f2b3d57ed8522355","sensorName":"Buiten01","value":13.7,'
+                         '"type":"Temperature","unit":"C","timestamp":1710348253}')
+        assert db.Insert(msg, "sensorData") is True
+        row = self._read(url, "sensorData").iloc[0]
+        assert (row["sensorName"], row["value"], row["unit"], row["timestamp"]) == ("Buiten01", 13.7, "C", 1710348253)
+        assert "weightStatistics" not in sqlalchemy.inspect(sqlalchemy.create_engine(url)).get_table_names()
 
     def test_battery_updates(self, tmp_path):
         url = _sqlite_url(tmp_path)

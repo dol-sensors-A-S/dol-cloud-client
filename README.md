@@ -153,7 +153,7 @@ python3 dol-cloud-client.py -c config-prod.json -ud 000ecd020000   # unclaim, re
   - SQLite database with automatic schema handling
   - Proper handling of inactiveSensors data in a separate table
   - Dynamic table creation with appropriate column types
-  - Filters DataFrame columns to match existing tables
+  - Adds new columns to existing tables when messages bring new fields (sensorData keeps its fixed schema)
   - Export all tables to different sheets in a single Excel file
 
 * **Plotting**
@@ -209,6 +209,20 @@ python3 dol-cloud-client.py -c config-prod.json -ud 000ecd020000   # unclaim, re
 
 * **visionMessage** - The `messages` list of each VisionStatus message (e.g. "In-pen calibration successful"):
   deviceId, timestamp, messageId, messageText, messagePayload
+
+  A VisionStatus message only contains the fields that changed, so most columns in a visionStatus row are empty.
+  A failed calibration typically arrives as two messages, one second apart:
+
+  ```json
+  {"deviceId":"000ecdff0427","visionStatus":{"calibrationLastUpdate":"2025-01-31T08:13:55Z","messages":[{"messageId":2,"messageText":"Max image has too few pixels withing distance limits.","messagePayload":""}]},"timestamp":1738311235}
+  {"deviceId":"000ecdff0427","visionStatus":{"calibration":"Required","messages":[]},"timestamp":1738311236}
+  ```
+
+  and a successful one as `"In-pen calibration successful "` followed by `"calibration":"Done"`.
+  Dirty lens: `{"deviceId":"000ecdff0422","visionStatus":{"isDirty":"Very Dirty","messages":[]},"timestamp":1744835030}`.
+
+* **visionStatusLatest** (Excel sheet only) - Current state per camera: the last known value of every visionStatus
+  field, plus the last message (lastMessageId, lastMessageText, lastMessageDate). Built from all history, also with `-s`.
 
 * **weightStatistics** - IDOL65 weight statistics from the data queue, join with sensorData on `id`:
   id, deviceId, sensorId, timestamp, count, countDelta, minWeight, maxWeight, timespan, sd, skewness, withinSpec
