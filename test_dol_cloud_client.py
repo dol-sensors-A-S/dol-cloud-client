@@ -540,6 +540,8 @@ class TestDatabaseExport:
         assert isinstance(result, dict)
         assert "sensorData" in result
         assert "sensorStatus" in result
+        # progress bar must reach the total, otherwise alive_bar shows (!)
+        assert bar_inst.call_count == len(result)
 
     def test_export_to_excel_creates_file(self, tmp_path):
         db, _ = self._seed_db(tmp_path)

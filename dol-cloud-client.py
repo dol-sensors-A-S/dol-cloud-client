@@ -649,6 +649,7 @@ class Database:
         with alive_bar(len(tables), title="Exporting tables") as bar:
             for table in tables:
                 result[table] = self._export_table(table, sort, progress_bar=bar)
+                bar()
                 
         return result
 
